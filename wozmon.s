@@ -12,34 +12,32 @@ MODE  = $2B                            ; $00=XAM, $7F=STOR, $AE=BLOCK XAM
 
 IN    = $0200                          ; Input buffer
 
-KBD   = $D010                          ; PIA.A keyboard input
-KBDCR = $D011                          ; PIA.A keyboard control register
-DSP   = $D012                          ; PIA.B display output register
-DSPCR = $D013                          ; PIA.B display control register
+ACIA_DATA   = $5000
+ACIA_STATUS = $5001
+ACIA_CMD    = $5002
+ACIA_CTRL   = $5003
 
 RESET:
-                CLD                    ; Clear decimal arithmetic mode.
-                CLI
-                LDY     #$7F           ; Mask for DSP data direction reg.
-                STY     DSP            ; Set it up.
-                LDA     #$A7           ; KBD and DSP control register mask.
-                STA     KBDCR          ; Enable interrupts, set CA1, CB1 for
-                STA     DSPCR          ;  positive edge sense/output mode.
+                LDA     #$1F           ; 8-N-1, 19200 baud.
+                STA     ACIA_CTRL
+                LDA     #$0B           ; No parity, no echo, no interrupts.
+                STA     ACIA_CMD
+                LDA     #$1B           ; Begin with escape.
 
 NOTCR:
-                CMP     #$DF           ; Backspace key?
+                CMP     #$08           ; Backspace key?
                 BEQ     BACKSPACE      ; Yes.
-                CMP     #$9B           ; ESC?
+                CMP     #$1B           ; ESC?
                 BEQ     ESCAPE         ; Yes.
                 INY                    ; Advance text index.
                 BPL     NEXTCHAR       ; Auto ESC if line longer than 127.
 
 ESCAPE:
-                LDA     #$DC           ; "\".
+                LDA     #$5C           ; "\".
                 JSR     ECHO           ; Output it.
 
 GETLINE:
-                LDA     #$8D           ; Send CR
+                LDA     #$0D           ; Send CR
                 JSR     ECHO
 
                 LDY     #$01           ; Initialize text index.
@@ -47,33 +45,35 @@ BACKSPACE:      DEY                    ; Back up text index.
                 BMI     GETLINE        ; Beyond start of line, reinitialize.
 
 NEXTCHAR:
-                LDA     KBDCR          ; Key ready?
-                BPL     NEXTCHAR       ; Loop until ready.
-                LDA     KBD            ; Load character. B7 should be '1'.
+                LDA     ACIA_STATUS    ; Check status.
+                AND     #$08           ; Key ready?
+                BEQ     NEXTCHAR       ; Loop until ready.
+                LDA     ACIA_DATA      ; Load character. B7 will be '0'.
                 STA     IN,Y           ; Add to text buffer.
                 JSR     ECHO           ; Display character.
-                CMP     #$8D           ; CR?
+                CMP     #$0D           ; CR?
                 BNE     NOTCR          ; No.
 
                 LDY     #$FF           ; Reset text index.
                 LDA     #$00           ; For XAM mode.
                 TAX                    ; X=0.
+SETBLOCK:
+                ASL
 SETSTOR:
                 ASL                    ; Leaves $7B if setting STOR mode.
-SETMODE:
-                STA     MODE           ; $00 = XAM, $7B = STOR, $AE = BLOK XAM.
+                STA     MODE           ; $00 = XAM, $74 = STOR, $B8 = BLOK XAM.
 BLSKIP:
                 INY                    ; Advance text index.
 NEXTITEM:
                 LDA     IN,Y           ; Get character.
-                CMP     #$8D           ; CR?
+                CMP     #$0D           ; CR?
                 BEQ     GETLINE        ; Yes, done this line.
-                CMP     #$AE           ; "."?
+                CMP     #$2E           ; "."?
                 BCC     BLSKIP         ; Skip delimiter.
-                BEQ     SETMODE        ; Set BLOCK XAM mode.
-                CMP     #$BA           ; ":"?
+                BEQ     SETBLOCK       ; Set BLOCK XAM mode.
+                CMP     #$3A           ; ":"?
                 BEQ     SETSTOR        ; Yes, set STOR mode.
-                CMP     #$D2           ; "R"?
+                CMP     #$52           ; "R"?
                 BEQ     RUN            ; Yes, run user program.
                 STX     L              ; $00 -> L.
                 STX     H              ;    and H.
@@ -81,7 +81,7 @@ NEXTITEM:
 
 NEXTHEX:
                 LDA     IN,Y           ; Get character for hex test.
-                EOR     #$B0           ; Map digits to $0-9.
+                EOR     #$30           ; Map digits to $0-9.
                 CMP     #$0A           ; Digit?
                 BCC     DIG            ; Yes.
                 ADC     #$88           ; Map letter "A"-"F" to $FA-FF.
@@ -132,17 +132,17 @@ SETADR:         LDA     L-1,X          ; Copy hex data to
 
 NXTPRNT:
                 BNE     PRDATA         ; NE means no address to print.
-                LDA     #$8D           ; CR.
+                LDA     #$0D           ; CR.
                 JSR     ECHO           ; Output it.
                 LDA     XAMH           ; 'Examine index' high-order byte.
                 JSR     PRBYTE         ; Output it in hex format.
                 LDA     XAML           ; Low-order 'examine index' byte.
                 JSR     PRBYTE         ; Output it in hex format.
-                LDA     #$BA           ; ":".
+                LDA     #$3A           ; ":".
                 JSR     ECHO           ; Output it.
 
 PRDATA:
-                LDA     #$A0           ; Blank.
+                LDA     #$20           ; Blank.
                 JSR     ECHO           ; Output it.
                 LDA     (XAML,X)       ; Get data byte at 'examine index'.
                 JSR     PRBYTE         ; Output it in hex format.
@@ -173,15 +173,18 @@ PRBYTE:
 
 PRHEX:
                 AND     #$0F           ; Mask LSD for hex print.
-                ORA     #$B0           ; Add "0".
-                CMP     #$BA           ; Digit?
+                ORA     #$30           ; Add "0".
+                CMP     #$3A           ; Digit?
                 BCC     ECHO           ; Yes, output it.
                 ADC     #$06           ; Add offset for letter.
 
 ECHO:
-                BIT     DSP            ; DA bit (B7) cleared yet?
-                BMI     ECHO           ; No, Wait for display.
-                STA     DSP            ; Output character. Sets DA.
+                PHA                    ; Save A.
+                STA     ACIA_DATA      ; Output character.
+                LDA     #$FF           ; Initialize delay loop.
+TXDELAY:        DEC                    ; Decrement A.
+                BNE     TXDELAY        ; Until A gets to 0.
+                PLA                    ; Restore A.
                 RTS                    ; Return.
 
   .org $FFFA
